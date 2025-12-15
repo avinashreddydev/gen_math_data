@@ -7,6 +7,8 @@ from openai import OpenAI
 from transformers import AutoTokenizer
 from datasets import load_from_disk, load_dataset
 from utils import DATASET_KEYS, RESPONSE_EXTRACTOR, RESPONSE_COMPARATOR
+import time
+from datetime import datetime
 
 
 # This script evaluates a model on a dataset using vLLM server via OpenAI SDK
@@ -20,6 +22,7 @@ parser.add_argument("--temperature", type=float, default=0.6)
 parser.add_argument("--output_file", type=str, default=None)
 parser.add_argument("--max_samples", type=int, default=-1)
 parser.add_argument("--num_copies", type=int, default=1)
+parser.add_argument("--inference_split", type=str, default="")
 args = parser.parse_args()
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -117,11 +120,19 @@ def evaluate_and_save(output_file: str, dataset, args):
 
     # Get test dataset - replicate each question 16 times for diverse solutions
 
+    if args.inference_split:
+        split = args.inference_split.replace("[", "").replace("]", "")
+        start_index_str, end_index_str = split.split(":")
+        start_index = int(start_index_str) if start_index_str else None
+        end_index = int(end_index_str) if end_index_str else None
+        dataset = dataset.select(range(start_index, end_index))
+
     if MAX_TEST_SAMPLES > 0:
         dataset = dataset.select(range(MAX_TEST_SAMPLES))
 
     test_ds = []
-    for sample in dataset:
+    for idx, sample in enumerate(dataset):
+        sample["idx"] = idx
         for _ in range(args.num_copies):
             test_ds.append(sample)
 
@@ -136,6 +147,7 @@ def evaluate_and_save(output_file: str, dataset, args):
     jsonl_file = open(output_file, "w")
 
     for idx, sample in enumerate(tqdm(test_ds, desc="Evaluating")):
+        index = sample["idx"]
         problem = sample[QUESTION_KEY]
         gold_answer_raw = sample[ANSWER_KEY]
         gold_answer = extract_answer(gold_answer_raw)
@@ -157,7 +169,7 @@ def evaluate_and_save(output_file: str, dataset, args):
 
         # Create result record
         result = {
-            "idx": idx,
+            "idx": index,
             "problem": problem,
             "reasoning": reasoning,
             "solution": solution,
@@ -228,11 +240,21 @@ def evaluate_and_save(output_file: str, dataset, args):
 # Main execution
 if __name__ == "__main__":
     # Determine output file name
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     if args.output_file:
         output_file = args.output_file
     else:
-        os.makedirs("outputs", exist_ok=True)
-        output_file = f"outputs/{dataset_name.replace('/', '_')}_results_{model.replace('/', '_')}_{tok_limit}.jsonl"
+        os.makedirs(f"outputs/{timestamp}", exist_ok=True)
+        output_file = f"outputs/{timestamp}/{dataset_name.replace('/', '_')}_results_{model.replace('/', '_')}_{tok_limit}.jsonl"
+
+    # save the args with timestamp
+
+    args_filename = f"outputs/{timestamp}/args.json"
+
+    with open(args_filename, "w") as f:
+        json.dump(vars(args), f, indent=4)
 
     print(f"Model: {model}")
     print(f"Dataset: {dataset_name}")
